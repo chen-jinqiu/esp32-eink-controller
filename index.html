@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+<title>墨水屏工作台 (分离版)</title>
+<link href="https://cdn.bootcdn.net/ajax/libs/cropperjs/1.5.13/cropper.min.css" rel="stylesheet">
+<script src="https://cdn.bootcdn.net/ajax/libs/cropperjs/1.5.13/cropper.min.js"></script>
+<style>
+    body { font-family: sans-serif; background: #1a1a1a; color: #ddd; text-align: center; margin: 0; padding: 20px; }
+    .container { max-width: 600px; margin: 0 auto; }
+    
+    /* IP 设置栏 */
+    .ip-bar { background: #333; padding: 15px; border-radius: 8px; margin-bottom: 20px; display: flex; gap: 10px; align-items: center; justify-content: center; }
+    .ip-bar input { background: #222; border: 1px solid #555; color: white; padding: 8px; border-radius: 4px; width: 140px; text-align: center; }
+    
+    .img-box { height: 350px; background: #222; border: 1px solid #444; margin-bottom: 15px; }
+    img { max-width: 100%; max-height: 100%; }
+    
+    .controls { background: #333; padding: 20px; border-radius: 8px; }
+    button { padding: 10px 20px; border-radius: 5px; border: none; font-weight: bold; cursor: pointer; margin: 5px; }
+    .btn-blue { background: #007bff; color: white; }
+    .btn-green { background: #28a745; color: white; }
+    button:disabled { background: #555; cursor: not-allowed; }
+    
+    select { padding: 8px; background: #eee; border-radius: 4px; border: none; }
+    canvas { display: none; margin-top: 10px; border: 4px solid white; }
+    #status { margin-top: 15px; color: #aaa; font-size: 14px; }
+</style>
+</head>
+<body>
+
+<div class="container">
+    <div class="ip-bar">
+        <label>设备 IP:</label>
+        <input type="text" id="espIp" placeholder="例如 192.168.1.16" value="">
+        <button class="btn-blue" onclick="saveIp()" style="padding: 8px 15px; font-size: 12px;">保存</button>
+    </div>
+
+    <h3>📷 图片裁剪 & 上传</h3>
+    <input type="file" id="fileInput" accept="image/*" style="margin-bottom: 10px;">
+    
+    <div class="img-box">
+        <img id="image" src="">
+    </div>
+
+    <div class="controls">
+        <label>算法: </label>
+        <select id="algo">
+            <option value="atkinson">Atkinson (推荐)</option>
+            <option value="floyd">Floyd-Steinberg</option>
+            <option value="bayer">Bayer 有序</option>
+            <option value="threshold">黑白阈值</option>
+        </select>
+        
+        <br><br>
+        <button class="btn-blue" onclick="process()">👁️ 预览</button>
+        <button id="uploadBtn" class="btn-green" onclick="upload()" disabled>🚀 发送</button>
+        <div id="status">等待操作...</div>
+    </div>
+    
+    <canvas id="previewCanvas"></canvas>
+</div>
+
+<script>
+    // 配置
+    const EPD_W = 296;
+    const EPD_H = 128;
+    
+    // 初始化 IP
+    const savedIp = localStorage.getItem('esp32_ip');
+    if(savedIp) document.getElementById('espIp').value = savedIp;
+
+    const image = document.getElementById('image');
+    const previewCanvas = document.getElementById('previewCanvas');
+    const ctx = previewCanvas.getContext('2d');
+    const status = document.getElementById('status');
+    const uploadBtn = document.getElementById('uploadBtn');
+    
+    let cropper;
+    let binaryData = null;
+    
+    previewCanvas.width = EPD_W;
+    previewCanvas.height = EPD_H;
+
+    // 保存 IP 到浏览器缓存
+    function saveIp() {
+        const ip = document.getElementById('espIp').value;
+        localStorage.setItem('esp32_ip', ip);
+        alert('IP 已保存: ' + ip);
+    }
+
+    document.getElementById('fileInput').onchange = (e) => {
+        const file = e.target.files[0];
+        if (file) {
+            image.src = URL.createObjectURL(file);
+            if (cropper) cropper.destroy();
+            cropper = new Cropper(image, {
+                aspectRatio: EPD_W / EPD_H,
+                viewMode: 1,
+                dragMode: 'move',
+                autoCropArea: 1,
+            });
+            uploadBtn.disabled = true;
+            previewCanvas.style.display = 'none';
+        }
+    };
+
+    function process() {
+        if (!cropper) return;
+        status.innerText = "处理中...";
+        
+        const croppedCanvas = cropper.getCroppedCanvas({
+            width: EPD_W, height: EPD_H, imageSmoothingQuality: 'high'
+        });
+
+        // 绘制白底
+        ctx.fillStyle = "white"; ctx.fillRect(0, 0, EPD_W, EPD_H);
+        ctx.drawImage(croppedCanvas, 0, 0);
+
+        const imgData = ctx.getImageData(0, 0, EPD_W, EPD_H);
+        const d = imgData.data;
+        
+        const algo = document.getElementById('algo').value;
+        if(algo === 'atkinson') ditherAtkinson(d);
+        else if(algo === 'floyd') ditherFloyd(d);
+        else if(algo === 'bayer') ditherBayer(d);
+        else ditherThreshold(d);
+
+        ctx.putImageData(imgData, 0, 0);
+        previewCanvas.style.display = 'block';
+        
+        // 生成二进制
+        const len = Math.ceil(EPD_W*EPD_H/8);
+        binaryData = new Uint8Array(len);
+        let idx=0, bit=0, val=0;
+        for(let i=0;i<d.length;i+=4){
+            if(d[i]>127) val|=(0x80>>bit);
+            if(++bit===8){binaryData[idx++]=val;val=0;bit=0;}
+        }
+        status.innerText = "准备就绪 (" + binaryData.length + " bytes)";
+        uploadBtn.disabled = false;
+    }
+
+    function upload() {
+        const ip = document.getElementById('espIp').value;
+        if (!ip) { alert("请输入 ESP32 的 IP 地址！"); return; }
+        if (!binaryData) return;
+        
+        status.innerText = "正在发送给: " + ip + "...";
+        uploadBtn.disabled = true;
+
+        // ★★★ 关键：向指定的 IP 发送跨域请求 ★★★
+        const url = `http://${ip}/upload_raw`;
+        
+        fetch(url, {
+            method: 'POST',
+            body: binaryData,
+            headers: {'Content-Type': 'application/octet-stream'}
+        })
+        .then(res => {
+            if(!res.ok) throw new Error("连接失败");
+            status.innerText = "✅ 发送成功！";
+            uploadBtn.disabled = false;
+        })
+        .catch(err => {
+            status.innerText = "❌ 失败: " + err.message + " (请检查 IP 是否正确)";
+            uploadBtn.disabled = false;
+        });
+    }
+
+    // 算法函数 (压缩版)
+    function ditherAtkinson(d){for(let y=0;y<EPD_H;y++)for(let x=0;x<EPD_W;x++){const i=(y*EPD_W+x)*4,o=d[i],n=o>127?255:0,e=(o-n)>>3;d[i]=d[i+1]=d[i+2]=n;D(d,x+1,y,e);D(d,x+2,y,e);D(d,x-1,y+1,e);D(d,x,y+1,e);D(d,x+1,y+1,e);D(d,x,y+2,e);}}
+    function ditherFloyd(d){for(let y=0;y<EPD_H;y++)for(let x=0;x<EPD_W;x++){const i=(y*EPD_W+x)*4,o=d[i],n=o>127?255:0,e=(o-n)>>4;d[i]=d[i+1]=d[i+2]=n;D(d,x+1,y,e*7);D(d,x-1,y+1,e*3);D(d,x,y+1,e*5);D(d,x+1,y+1,e);}}
+    function ditherBayer(d){const m=[[1,9,3,11],[13,5,15,7],[4,12,2,10],[16,8,14,6]];for(let i=0;i<d.length;i+=4){const x=(i/4)%EPD_W,y=Math.floor((i/4)/EPD_W),t=(m[x%4][y%4]/17)*255;const v=d[i]>t?255:0;d[i]=d[i+1]=d[i+2]=v;}}
+    function ditherThreshold(d){for(let i=0;i<d.length;i+=4){const v=d[i]>127?255:0;d[i]=d[i+1]=d[i+2]=v;}}
+    function D(d,x,y,e){if(x>=0&&x<EPD_W&&y>=0&&y<EPD_H){const i=(y*EPD_W+x)*4;d[i]=Math.min(255,Math.max(0,d[i]+e));}}
+</script>
+</body>
+</html>
